@@ -6,7 +6,7 @@
 // Protocol contract 1.1. Multi-byte values are little-endian.
 // What each register means: https://expander.buildingblockrobotics.com/
 
-package com.botbuilders.bbr;
+package com.buildingblockrobotics.expander;
 
 public final class BBRRegMap {
     private BBRRegMap() {}

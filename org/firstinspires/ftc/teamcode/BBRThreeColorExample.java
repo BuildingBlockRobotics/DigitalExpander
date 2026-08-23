@@ -11,7 +11,7 @@
 // while their colour is seen.
 package org.firstinspires.ftc.teamcode;
 
-import com.botbuilders.bbr.BBRDigitalExpander;
+import com.buildingblockrobotics.expander.BBRDigitalExpander;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 import com.qualcomm.robotcore.hardware.DigitalChannel;

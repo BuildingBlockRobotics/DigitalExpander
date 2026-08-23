@@ -4,7 +4,7 @@
 // taught colour survives power-off with no extra step to forget.
 package org.firstinspires.ftc.teamcode;
 
-import com.botbuilders.bbr.BBRDigitalExpander;
+import com.buildingblockrobotics.expander.BBRDigitalExpander;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 

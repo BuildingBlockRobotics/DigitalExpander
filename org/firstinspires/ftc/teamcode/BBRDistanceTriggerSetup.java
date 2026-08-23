@@ -10,7 +10,7 @@
 // hysteresis or two-sided windows — see the register map's worked example.
 package org.firstinspires.ftc.teamcode;
 
-import com.botbuilders.bbr.BBRDigitalExpander;
+import com.buildingblockrobotics.expander.BBRDigitalExpander;
 import com.qualcomm.robotcore.eventloop.opmode.Autonomous;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.hardware.DigitalChannel;

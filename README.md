@@ -17,8 +17,9 @@ no I2C traffic and no code in your loop. Your match OpMode reads a stock
 Copy both folders into your FTC project's TeamCode source root
 (`TeamCode/src/main/java/`):
 
-- `com/botbuilders/bbr/` — the driver (`BBRDigitalExpander`) and the register
-  map constants (`BBRRegMap`, a generated file — do not edit it).
+- `com/buildingblockrobotics/expander/` — the driver (`BBRDigitalExpander`)
+  and the register map constants (`BBRRegMap`, a generated file — do not
+  edit it).
 - `org/firstinspires/ftc/teamcode/` — example OpModes; copy the ones you want.
 
 Then add the device in the robot configuration: on the I2C bus it is wired to,

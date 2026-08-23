@@ -14,10 +14,10 @@
 // register map — raw telemetry blocks, config windows, and runCommand —
 // for teams that outgrow the helpers.
 //
-// Install: copy the com/botbuilders/bbr folder into TeamCode/src/main/java,
+// Install: copy the com/buildingblockrobotics/expander folder into TeamCode/src/main/java,
 // add the device to the robot configuration as "BBR Digital Expander" on an
 // I2C bus, then hardwareMap.get(BBRDigitalExpander.class, "expander").
-package com.botbuilders.bbr;
+package com.buildingblockrobotics.expander;
 
 import com.qualcomm.robotcore.hardware.I2cAddr;
 import com.qualcomm.robotcore.hardware.I2cDeviceSynch;

@@ -6,7 +6,7 @@
 // Passive: no modes are changed and nothing is written to the device.
 package org.firstinspires.ftc.teamcode;
 
-import com.botbuilders.bbr.BBRDigitalExpander;
+import com.buildingblockrobotics.expander.BBRDigitalExpander;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 

@@ -4,7 +4,7 @@
 // sensor reads "class 0 / nothing", never a confident wrong answer.
 package org.firstinspires.ftc.teamcode;
 
-import com.botbuilders.bbr.BBRDigitalExpander;
+import com.buildingblockrobotics.expander.BBRDigitalExpander;
 import com.qualcomm.robotcore.eventloop.opmode.LinearOpMode;
 import com.qualcomm.robotcore.eventloop.opmode.TeleOp;
 
