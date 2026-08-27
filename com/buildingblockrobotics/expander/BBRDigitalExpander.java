@@ -624,14 +624,20 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
      * never reaches it. Push the robot and check — driving forward should
      * raise the X pod's count, strafing left should raise the Y pod's.
      *
-     * <p>Written to RAM: call {@link #saveConfigToFlash} afterwards, or the
-     * direction is back to front again after a power cycle.
+     * <p>Saved to flash automatically, so the direction survives a power
+     * cycle — a channel that counts backwards after every reboot is a bug
+     * nobody traces back to a missing save call. Setting the same direction
+     * repeatedly costs nothing: the firmware compares the payload it would
+     * write against what is already stored and skips the write.
+     *
+     * <p>Like the other setup helpers, run this once rather than in a loop.
      */
     public void setEncoderDirection(int channel, Direction direction) {
         checkChannel(channel);
         int bit = 1 << channel;
         int mask = getEncoderInvertMask();
         setEncoderInvertMask(direction == Direction.REVERSE ? (mask | bit) : (mask & ~bit));
+        autoSaveIfDirty();
     }
 
     /** Which way {@code channel} (0-3) currently counts. */

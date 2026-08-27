@@ -36,6 +36,7 @@ public class BBRLocalizerExample extends LinearOpMode {
         p.portX = 0;   // pod that rolls when the robot drives forward/back
         p.portY = 1;   // pod that rolls when the robot strafes left/right
         exp.setLocalizerParams(p);
+        exp.saveConfigToFlash();   // parameters do NOT save themselves
 
         // DIRECTION. The localizer needs forward and left travel to BOTH
         // count positive. It reads the channels itself, so negating a number
@@ -44,9 +45,9 @@ public class BBRLocalizerExample extends LinearOpMode {
         // Push the robot to find out which way each pod counts: driving
         // forward should raise the X count, strafing left should raise Y. If
         // one goes the wrong way, change its FORWARD to REVERSE.
+        // These two DO save themselves, so the direction survives a reboot.
         exp.setEncoderDirection(0, BBRDigitalExpander.Direction.FORWARD);  // X pod
         exp.setEncoderDirection(1, BBRDigitalExpander.Direction.FORWARD);  // Y pod
-        exp.saveConfigToFlash();
 
         telemetry.addLine("Keep the robot STILL — calibrating on start");
         telemetry.addLine("A = re-zero pose, B = teleport to (500, -200, 90 deg)");
