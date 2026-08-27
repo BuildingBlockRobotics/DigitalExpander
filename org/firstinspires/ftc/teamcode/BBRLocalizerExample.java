@@ -27,9 +27,26 @@ public class BBRLocalizerExample extends LinearOpMode {
         BBRDigitalExpander.LocalizerParams p = new BBRDigitalExpander.LocalizerParams();
         p.ticksPerMmX = 19.89;
         p.ticksPerMmY = 19.89;
-        p.portX = 0;
-        p.portY = 1;
+
+        // WHICH ENCODER CHANNELS THE PODS ARE ON. Any two of 0-3, as long as
+        // they differ and both are set — the localizer refuses to start
+        // otherwise. Both must stay in QUADRATURE mode: a channel switched to
+        // PULSE_WIDTH is measuring a pulse width, not counting ticks, and
+        // cannot drive the pose.
+        p.portX = 0;   // pod that rolls when the robot drives forward/back
+        p.portY = 1;   // pod that rolls when the robot strafes left/right
         exp.setLocalizerParams(p);
+
+        // DIRECTION. The localizer needs forward and left travel to BOTH
+        // count positive. It reads the channels itself, so negating a number
+        // in your OpMode never reaches it — fix it here instead.
+        //
+        // Push the robot to find out which way each pod counts: driving
+        // forward should raise the X count, strafing left should raise Y. If
+        // one goes the wrong way, change its FORWARD to REVERSE.
+        exp.setEncoderDirection(0, BBRDigitalExpander.Direction.FORWARD);  // X pod
+        exp.setEncoderDirection(1, BBRDigitalExpander.Direction.FORWARD);  // Y pod
+        exp.saveConfigToFlash();
 
         telemetry.addLine("Keep the robot STILL — calibrating on start");
         telemetry.addLine("A = re-zero pose, B = teleport to (500, -200, 90 deg)");
@@ -42,12 +59,10 @@ public class BBRLocalizerExample extends LinearOpMode {
         if (!exp.waitForLocalizerReady(5000)) {
             telemetry.addLine("Localizer never reached RUNNING — is the robot moving?");
             telemetry.update();
-           
+            return;
         }
 
         waitForStart();
-
-        
 
         boolean prevA = false, prevB = false;
         while (opModeIsActive()) {

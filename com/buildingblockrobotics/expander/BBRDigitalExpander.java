@@ -111,6 +111,10 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
 
     public enum ChannelMode { QUADRATURE, PULSE_WIDTH }
 
+    /** Which way an encoder channel counts. Same idea, and the same
+     *  two names, as {@code DcMotor.Direction}. */
+    public enum Direction { FORWARD, REVERSE }
+
     /** What drives a digital output. */
     public enum OutputSource {
         DISABLED(BBRRegMap.DOUT_SRC_DISABLED),
@@ -610,10 +614,38 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
     }
 
     /**
-     * Per-channel encoder direction: bit n set inverts channel n's reported
-     * counts and velocity. Use it so forward and left (strafe) travel both
-     * count positive for the localizer. Written to RAM — call
-     * {@link #saveConfigToFlash} to persist.
+     * Make {@code channel} (0-3) count UP when the thing it measures moves the
+     * way you consider forward. {@code REVERSE} flips both the count and the
+     * velocity for that channel.
+     *
+     * <p>This is the fix for an encoder that counts backwards, and it belongs
+     * here rather than in your own code: the odometry localizer reads the
+     * channels straight off the board, so negating a number in an OpMode
+     * never reaches it. Push the robot and check — driving forward should
+     * raise the X pod's count, strafing left should raise the Y pod's.
+     *
+     * <p>Written to RAM: call {@link #saveConfigToFlash} afterwards, or the
+     * direction is back to front again after a power cycle.
+     */
+    public void setEncoderDirection(int channel, Direction direction) {
+        checkChannel(channel);
+        int bit = 1 << channel;
+        int mask = getEncoderInvertMask();
+        setEncoderInvertMask(direction == Direction.REVERSE ? (mask | bit) : (mask & ~bit));
+    }
+
+    /** Which way {@code channel} (0-3) currently counts. */
+    public Direction getEncoderDirection(int channel) {
+        checkChannel(channel);
+        return (getEncoderInvertMask() & (1 << channel)) != 0
+                ? Direction.REVERSE : Direction.FORWARD;
+    }
+
+    /**
+     * All four channels at once as a bitmask: bit n set inverts channel n.
+     * {@link #setEncoderDirection} says the same thing one channel at a time
+     * and reads better; this is here for setting several in one transaction.
+     * Written to RAM — call {@link #saveConfigToFlash} to persist.
      */
     public void setEncoderInvertMask(int mask) {
         checkRange("mask", mask, 0, (1 << BBRRegMap.NUM_ENCODERS) - 1);
@@ -1263,9 +1295,13 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         }
 
         /**
-         * True when a pod's encoder channel is also claimed by another
-         * feature (e.g. PULSE_WIDTH mode) — the pose cannot be right
-         * until the configuration conflict is fixed.
+         * True if a pod's encoder channel was disturbed while the localizer
+         * was running — its invert mask, channel mode or PWM parameters
+         * changed. The firmware swallows one tick delta rather than
+         * integrating the jump, so the pose is missing that tick and this
+         * latches to say so. It is a "something changed under me" report,
+         * not a standing misconfiguration: set direction and mode once at
+         * setup, before starting the localizer.
          */
         public boolean hasPortConflict() {
             return (flags & BBRRegMap.LOCF_PORT_CONFLICT) != 0;
