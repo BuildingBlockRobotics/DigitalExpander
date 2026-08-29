@@ -85,6 +85,11 @@ tier never auto-saves; call `saveConfigToFlash()` yourself.
 - **IMU access throws** (never returns zeros) on a missing or faulty
   IMU, with a message saying which. A heading of 0.00 that never changes
   would look exactly like working software.
+- **A corrupt localizer read serves the last good pose**, it does not
+  crash the OpMode. The block is CRC-checked and re-read up to three times;
+  if all three are corrupt the driver returns the previous pose and marks
+  `isDataFresh()` false. Only a streak that keeps failing for over half a
+  second throws — a burst of bus noise mid-match should not end the match.
 - **`BBRTransportException` means the read never reached the device**, not
   that anything is broken. The SDK tears the I2C device down when an OpMode
   stops, so a read already in flight comes back as all zeros (or all `0xFF`

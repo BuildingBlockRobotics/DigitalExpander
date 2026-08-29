@@ -1359,8 +1359,9 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
      * Raw localizer snapshot, any state; check {@code status} yourself.
      * Verifies LOC_CRC16 against the block — I2C acknowledges bytes without
      * verifying them, and a noise-flipped bit would otherwise arrive looking
-     * like a valid pose. Re-reads on mismatch; throws if corruption persists
-     * rather than returning a suspect pose.
+     * like a valid pose. Re-reads on mismatch, then serves the last good
+     * pose rather than a suspect one; a corruption streak that outlives a
+     * teardown still escalates through the fail-streak policy.
      */
     public LocalizerState readLocalizerRaw() {
         byte[] d;
@@ -1376,10 +1377,13 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
             }
             int stored = (d[crcOff] & 0xFF) | ((d[crcOff + 1] & 0xFF) << 8);
             if (crc16Profibus(d, 20) == stored) break;
+            // Three corrupt reads in a row is a bad moment on the bus, not
+            // proof the bus is gone: a burst of noise mid-match would
+            // otherwise crash the OpMode outright. Treat it as a failed read
+            // — serve the last good pose and let the fail-streak policy
+            // escalate if the corruption actually persists.
             if (attempt == 3) {
-                throw new BBRException(
-                        "Localizer read failed CRC16 three times — I2C bus corruption; "
-                                + "check wiring, cable routing, and ESD grounding");
+                return handleFailedRead(lastGoodLocalizer, "Localizer");
             }
         }
         ByteBuffer b = ByteBuffer.wrap(d).order(ByteOrder.LITTLE_ENDIAN);
