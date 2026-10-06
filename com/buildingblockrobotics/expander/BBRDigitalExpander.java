@@ -1,10 +1,12 @@
 // BBR Digital Expander — FTC SDK driver.
 //
-// Implements the BBR Digital Expander I2C protocol contract 1.1:
+// Implements the BBR Digital Expander I2C protocol contract 1.2:
 // identity and protocol verification (refuse on mismatch), the 3-byte
 // command block write with idempotency tokens, bounded completion polling,
-// single-transaction telemetry reads, write-through verification by
-// readback, and fail-loud IMU access.
+// single-transaction telemetry reads verified by CRC, write-through
+// verification by readback, and fail-loud IMU access. Boards on protocol
+// 1.1 still work; the 1.2 additions (telemetry CRC, diagnostics) are then
+// skipped or reported as unavailable.
 //
 // The API has two tiers. The EVERYDAY tier at the top of this file is what
 // a first-season programmer needs: one call per question ("how far?",
@@ -25,6 +27,7 @@ import com.qualcomm.robotcore.hardware.I2cDeviceSynchDevice;
 import com.qualcomm.robotcore.hardware.I2cWaitControl;
 import com.qualcomm.robotcore.hardware.configuration.annotations.DeviceProperties;
 import com.qualcomm.robotcore.hardware.configuration.annotations.I2cDeviceType;
+import com.qualcomm.robotcore.util.RobotLog;
 
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
@@ -66,11 +69,10 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
      * useless — it sent teams looking for ESD faults and, on the IMU path,
      * told them to replace a working board.
      *
-     * <p>Fail-loud still holds where it matters: a device that has never
-     * answered throws this, and a failure streak that outlives a stop-time
-     * teardown (see {@code FAIL_STREAK_*}) throws a plain BBRException
-     * naming the wiring, so stale data cannot impersonate working hardware
-     * for more than a fraction of a second.
+     * <p>A device that has never answered still throws this. A failure
+     * streak that outlives a stop-time teardown (see {@code FAIL_STREAK_*})
+     * is logged as a warning and the last good reading keeps being served,
+     * unless {@link #setReadFailurePolicy} asks for {@code STOP_OPMODE}.
      */
     public static class BBRTransportException extends BBRException {
         public BBRTransportException(String message) { super(message); }
@@ -115,6 +117,43 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
      *  two names, as {@code DcMotor.Direction}. */
     public enum Direction { FORWARD, REVERSE }
 
+    /**
+     * What the driver does when reads keep failing for over half a second
+     * (a loose cable, or noise on the bus), as opposed to the moment of
+     * failed reads every OpMode stop produces.
+     */
+    public enum ReadFailurePolicy {
+        /** Log a warning and keep serving the last good reading. Check
+         *  {@link #isDataFresh()} before acting on a reading. The default. */
+        KEEP_RUNNING,
+        /** Throw a BBRException, which ends the OpMode. */
+        STOP_OPMODE
+    }
+
+    /** Why the expander last reset. See {@link #readDiagnostics()}. */
+    public enum ResetCause {
+        UNKNOWN,
+        /** Power applied, or a brown-out: the chip cannot tell them apart. */
+        POWER_ON,
+        RUN_PIN,
+        /** The firmware stopped running and the watchdog restarted it. */
+        WATCHDOG,
+        /** A deliberate restart, e.g. after a firmware update. */
+        SOFTWARE,
+        DEBUG;
+
+        static ResetCause from(int v) {
+            switch (v) {
+                case BBRRegMap.RESET_POWER_ON: return POWER_ON;
+                case BBRRegMap.RESET_RUN_PIN: return RUN_PIN;
+                case BBRRegMap.RESET_WATCHDOG: return WATCHDOG;
+                case BBRRegMap.RESET_SOFTWARE: return SOFTWARE;
+                case BBRRegMap.RESET_DEBUG: return DEBUG;
+                default: return UNKNOWN;
+            }
+        }
+    }
+
     /** What drives a digital output. */
     public enum OutputSource {
         DISABLED(BBRRegMap.DOUT_SRC_DISABLED),
@@ -142,6 +181,7 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
     private int capabilities;
     private int protocolMinor;
     private int hwVariant;
+    private String firmwareVersion = "unknown";
 
     // Once the IMU has passed a full requireImu() check, the fitted/absent
     // question is settled for the life of the OpMode; readImu() then trusts
@@ -159,18 +199,33 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
     private int channelModeMask = -1;
 
     // Last-known-good snapshots, returned when a read never reaches the
-    // device (Pinpoint-style) so a stop-time teardown does not detonate the
-    // OpMode loop. Guarded by the fail-streak escalation below.
+    // device (Pinpoint-style) so a stop-time teardown, or a flaky bus, does
+    // not detonate the OpMode loop. Callers check isDataFresh().
     private TelemetryBlock lastGoodTelemetry;
     private ImuState lastGoodImu;
     private LocalizerState lastGoodLocalizer;
     private boolean lastReadFresh = true;
     private int failStreak = 0;
     private long failStreakStartMs;
+    private boolean failStreakLogged;
+    private ReadFailurePolicy readFailurePolicy = ReadFailurePolicy.KEEP_RUNNING;
     // A teardown produces at most a handful of calls before the loop exits;
     // only a real fault can keep a streak alive this long AND this often.
     private static final int FAIL_STREAK_MIN_READS = 5;
     private static final long FAIL_STREAK_MIN_MS = 500;
+
+    // Reboot detection: the device's uptime (us since its boot) as last seen
+    // in each snapshot type. A drop of more than REBOOT_BACKSTEP_MICROS is a
+    // reboot. Works on every protocol version; on 1.2 the reset cause is
+    // then read and logged as well.
+    private static final int SOURCE_TELEMETRY = 0;
+    private static final int SOURCE_IMU = 1;
+    private static final int SOURCE_LOCALIZER = 2;
+    private final long[] lastDeviceMicros = new long[3];
+    private int rebootCount;
+    private static final long REBOOT_BACKSTEP_MICROS = 1_000_000L;
+    // The clock is a u32 and wraps after ~71.6 min; a drop from near the top is that.
+    private static final long CLOCK_WRAP_MICROS = 0x1_0000_0000L;
 
     public BBRDigitalExpander(I2cDeviceSynch deviceClient, boolean deviceClientIsOwned) {
         super(deviceClient, deviceClientIsOwned);
@@ -221,6 +276,9 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
                             + "or a mis-assembled board", hwVariant));
         }
         capabilities = id[BBRRegMap.REG_CAPABILITIES] & 0xFF;
+        firmwareVersion = (id[BBRRegMap.REG_FW_VERSION_MAJOR] & 0xFF) + "."
+                + (id[BBRRegMap.REG_FW_VERSION_MINOR] & 0xFF) + "."
+                + (id[BBRRegMap.REG_FW_VERSION_PATCH] & 0xFF);
         return true;
     }
 
@@ -232,6 +290,10 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
 
     public int getCapabilities() { return capabilities; }
     public int getProtocolMinor() { return protocolMinor; }
+
+    /** The firmware version on the board, e.g. {@code "1.1.0"}. Worth
+     *  showing in telemetry when reporting a problem. */
+    public String getFirmwareVersion() { return firmwareVersion; }
     public boolean isOdometryVariant() { return hwVariant == BBRRegMap.VARIANT_ODOMETRY; }
 
     // ------------------------------------------------- argument validation
@@ -273,10 +335,26 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
     public synchronized boolean isDataFresh() { return lastReadFresh; }
 
     /**
+     * What to do when reads keep failing for over half a second. The
+     * default, {@code KEEP_RUNNING}, logs one warning per streak and keeps
+     * serving the last good reading, so a moment of bus trouble mid-match
+     * does not end the OpMode. Anything that acts on readings must then
+     * check {@link #isDataFresh()}. {@code STOP_OPMODE} throws instead, for
+     * bench testing where failing loudly is more useful than carrying on.
+     */
+    public synchronized void setReadFailurePolicy(ReadFailurePolicy policy) {
+        if (policy == null) throw new BBRException("policy must not be null");
+        readFailurePolicy = policy;
+    }
+
+    public synchronized ReadFailurePolicy getReadFailurePolicy() { return readFailurePolicy; }
+
+    /**
      * A snapshot read never reached the device: serve the last good reading
-     * rather than throwing mid-loop (a stopping OpMode reads this way), but
-     * stay fail-loud where it matters — throw if the device has NEVER
-     * answered, or if the streak has outlived any possible teardown.
+     * rather than throwing mid-loop (a stopping OpMode reads this way, and so
+     * does a flaky bus). Throws if the device has NEVER answered, as there is
+     * then no reading to serve, and on a long streak only under
+     * {@code STOP_OPMODE}.
      */
     private synchronized <T> T handleFailedRead(T lastGood, String what) {
         lastReadFresh = false;
@@ -289,16 +367,131 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         }
         if (failStreak >= FAIL_STREAK_MIN_READS
                 && now - failStreakStartMs >= FAIL_STREAK_MIN_MS) {
-            throw new BBRException(what
-                    + " reads have been failing for over half a second — not a normal "
-                    + "OpMode stop; check wiring, cable routing, and power");
+            if (readFailurePolicy == ReadFailurePolicy.STOP_OPMODE) {
+                throw new BBRException(what
+                        + " reads have been failing for over half a second — not a normal "
+                        + "OpMode stop; check wiring, cable routing, and power");
+            }
+            if (!failStreakLogged) {
+                failStreakLogged = true;
+                RobotLog.ww("BBRDigitalExpander", "%s reads have been failing for over half a"
+                        + " second; serving stale data. Check wiring, cable routing, and power",
+                        what);
+            }
         }
         return lastGood;
     }
 
-    private synchronized void noteGoodRead() {
+    private void noteGoodRead(int source, long deviceMicros) {
+        long previous;
+        int reboots;
+        synchronized (this) {
+            previous = lastDeviceMicros[source];
+            if (!recordGoodRead(source, deviceMicros)) return;
+            reboots = rebootCount;
+        }
+        // Outside the lock: an extra bus transaction, right after a reboot,
+        // must not stall other threads' accessors.
+        String cause = "power loss, brownout, or watchdog (hang / ESD)";
+        if (protocolMinor >= 2) {
+            try {
+                cause = "reset cause " + readDiagnostics().resetCause;
+            } catch (BBRTransportException e) {
+                cause = "reset cause unknown (diagnostics read failed)";
+            }
+        }
+        RobotLog.ww("BBRDigitalExpander", "expander REBOOTED (#%d since the app started):"
+                + " uptime now %.2f s, was %.2f s at the last good read; %s",
+                reboots, deviceMicros / 1e6, previous / 1e6, cause);
+    }
+
+    /** Updates the read-health state; returns whether the device rebooted. */
+    private synchronized boolean recordGoodRead(int source, long deviceMicros) {
+        // The device's microsecond clock counts from its own boot, so a reading that
+        // runs backwards means it rebooted in between: a power loss, a brownout, or
+        // the watchdog firing after a hang or an ESD strike. A short reboot recovers
+        // inside FAIL_STREAK_MIN_MS and would otherwise leave no trace at all.
+        // Each snapshot keeps its own clock: the IMU's only advances on a fusion
+        // sample, so comparing across snapshots would read it as going backwards.
+        long previous = lastDeviceMicros[source];
+        boolean rebooted = previous != 0L
+                && deviceMicros + REBOOT_BACKSTEP_MICROS < previous
+                && previous < CLOCK_WRAP_MICROS - REBOOT_BACKSTEP_MICROS;
+        lastDeviceMicros[source] = deviceMicros;
+        if (rebooted) {
+            rebootCount++;
+            // Keep the other snapshots from reporting the same reboot again.
+            for (int i = 0; i < lastDeviceMicros.length; i++) {
+                if (i != source) lastDeviceMicros[i] = 0L;
+            }
+        }
+        if (failStreakLogged) {
+            RobotLog.ii("BBRDigitalExpander", "reads recovered after %d failures; expander"
+                    + " uptime %.2f s (%s)", failStreak, deviceMicros / 1e6,
+                    rebooted ? "it rebooted" : "no reboot, so the bus itself was blocked");
+        }
         lastReadFresh = true;
         failStreak = 0;
+        failStreakLogged = false;
+        return rebooted;
+    }
+
+    /**
+     * How many times the expander has been seen to reboot since the Robot Controller app
+     * started (the driver outlives OpModes), detected from its uptime clock running
+     * backwards between good reads. Also catches a reboot that happened between OpModes.
+     */
+    public synchronized int getRebootCount() {
+        return rebootCount;
+    }
+
+    /**
+     * What the expander knows about its own health: why it last reset, and
+     * how often its I2C link to the Hub has been disturbed. See
+     * {@link #readDiagnostics()}.
+     */
+    public static class Diagnostics {
+        /** Why the expander last reset. */
+        public ResetCause resetCause;
+        /** Resets since power was applied (0-255). Above 0 with
+         *  {@code WATCHDOG} means the firmware hung. */
+        public int resetsSincePowerOn;
+        /** Times the expander freed a stuck I2C bus since it booted. Should
+         *  stay 0; climbing means transfers are being cut off mid-way. */
+        public int i2cRecoveryCount;
+        /** Times something other than the expander pulled the I2C data
+         *  line while it was replying, since it booted. Should stay 0;
+         *  climbing usually means electrical noise on the I2C cable. */
+        public int i2cArbitrationLostCount;
+    }
+
+    /**
+     * Read the expander's diagnostics in one bus transaction. Needs firmware
+     * 1.1.0 or newer (protocol 1.2). Read it again later and compare the
+     * counters: their size matters less than whether they grow while the
+     * robot runs. Throws {@link BBRTransportException} if the read never
+     * reached the device.
+     */
+    public Diagnostics readDiagnostics() {
+        if (protocolMinor < 2) {
+            throw new BBRException("Diagnostics need expander firmware 1.1.0 or newer"
+                    + " (this board has " + firmwareVersion + "); update the firmware");
+        }
+        byte[] d = deviceClient.read(BBRRegMap.SNAP_DIAGNOSTICS_START,
+                BBRRegMap.SNAP_DIAGNOSTICS_END - BBRRegMap.SNAP_DIAGNOSTICS_START + 1);
+        // RESET_CAUSE is set at every boot, so a uniform block is a transfer
+        // that never happened, not a healthy board with zero counters.
+        if (looksLikeFailedRead(d)) {
+            throw new BBRTransportException("Diagnostics read did not reach the device");
+        }
+        ByteBuffer b = ByteBuffer.wrap(d).order(ByteOrder.LITTLE_ENDIAN);
+        int base = BBRRegMap.SNAP_DIAGNOSTICS_START;
+        Diagnostics g = new Diagnostics();
+        g.resetCause = ResetCause.from(d[BBRRegMap.REG_RESET_CAUSE - base] & 0xFF);
+        g.resetsSincePowerOn = d[BBRRegMap.REG_RESETS_SINCE_POWER_ON - base] & 0xFF;
+        g.i2cRecoveryCount = b.getShort(BBRRegMap.REG_I2C_RECOVERY_COUNT - base) & 0xFFFF;
+        g.i2cArbitrationLostCount = b.getShort(BBRRegMap.REG_I2C_ARB_LOST_COUNT - base) & 0xFFFF;
+        return g;
     }
 
     // ======================================================================
@@ -648,6 +841,29 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
     }
 
     /**
+     * How long, in milliseconds (1-255), the expander measures over to work
+     * out each encoder velocity. Applies to all four channels. Longer is
+     * smoother and finer but slower to react; shorter reacts faster but is
+     * noisier. The default is 25 ms, where one count of change is
+     * 40 counts/s.
+     *
+     * <p>Saved to flash automatically, like {@link #setEncoderDirection}.
+     * Run it once rather than in a loop. This does not change the
+     * odometry localizer, which has its own window in its parameters.
+     */
+    public void setEncoderVelocityWindowMs(int ms) {
+        checkRange("ms", ms, 1, 255);
+        writeVerified(BBRRegMap.REG_VEL_INTERVAL_MS, (byte) ms, "VEL_INTERVAL_MS");
+        autoSaveIfDirty();
+    }
+
+    /** The encoder velocity window in milliseconds; see
+     *  {@link #setEncoderVelocityWindowMs}. */
+    public int getEncoderVelocityWindowMs() {
+        return deviceClient.read(BBRRegMap.REG_VEL_INTERVAL_MS, 1)[0] & 0xFF;
+    }
+
+    /**
      * All four channels at once as a bitmask: bit n set inverts channel n.
      * {@link #setEncoderDirection} says the same thing one channel at a time
      * and reads better; this is here for setting several in one transaction.
@@ -663,10 +879,34 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         return deviceClient.read(BBRRegMap.REG_ENC_INVERT_MASK, 1)[0] & 0xFF;
     }
 
-    /** Re-estimate gyro bias (~1 s). The robot must be completely still. */
-    public void calibrateGyro() {
+    /**
+     * Re-estimate gyro bias (~1 s). Keep the robot completely still. Returns
+     * {@code true} with a fresh bias, or {@code false} if the robot moved:
+     * the previous bias is kept and the IMU carries on, so a bump never ends
+     * the OpMode. Call again while still if heading drift matters.
+     */
+    public boolean calibrateGyro() {
         requireImu();
-        runCommand(BBRRegMap.CMD_CALIBRATE_GYRO, 0, BBRRegMap.CMD_CALIBRATE_GYRO_MAX_MS);
+        return runCalibration(BBRRegMap.CMD_CALIBRATE_GYRO, BBRRegMap.CMD_CALIBRATE_GYRO_MAX_MS,
+                "calibrateGyro");
+    }
+
+    /**
+     * A calibration that saw the robot move is not a failure worth an
+     * exception: the firmware keeps the previous bias (and LOC_RESET still
+     * resets the pose and starts the localizer), so the robot is exactly as
+     * usable as before. Throwing here ended OpModes mid-match on a nudge.
+     */
+    private boolean runCalibration(int opcode, int maxMs, String what) {
+        try {
+            runCommand(opcode, 0, maxMs);
+            return true;
+        } catch (BBRCommandException e) {
+            if (e.resultCode != BBRRegMap.ERR_IMU_NOT_STATIONARY) throw e;
+            RobotLog.ww("BBRDigitalExpander", "%s: the robot moved during gyro calibration;"
+                    + " keeping the previous bias", what);
+            return false;
+        }
     }
 
     /** Current pose. Throws unless the localizer is RUNNING. */
@@ -906,13 +1146,25 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
      * Read the whole telemetry block in one bus transaction. If the read
      * never reaches the device (stop-time teardown), the previous good
      * block is returned instead — see {@link #isDataFresh}.
+     *
+     * <p>On protocol 1.2 and later the block is checked against
+     * TELEMETRY_CRC16 and re-read on mismatch, the same way the localizer
+     * block is: a corrupted encoder velocity would otherwise arrive looking
+     * valid. After three corrupt reads the last good block is served.
      */
     public TelemetryBlock readTelemetry() {
-        byte[] d = deviceClient.read(BBRRegMap.SNAP_TELEMETRY_START, 96);
-        // The timestamp is nonzero from the first millisecond of boot, so a
-        // uniform block can only be a transfer that never happened.
-        if (looksLikeFailedRead(d)) {
-            return handleFailedRead(lastGoodTelemetry, "Telemetry");
+        byte[] d;
+        for (int attempt = 1; ; attempt++) {
+            d = deviceClient.read(BBRRegMap.SNAP_TELEMETRY_START, 96);
+            // The timestamp is nonzero from the first millisecond of boot, so a
+            // uniform block can only be a transfer that never happened.
+            if (looksLikeFailedRead(d)) {
+                return handleFailedRead(lastGoodTelemetry, "Telemetry");
+            }
+            if (protocolMinor < 2 || telemetryCrcMatches(d)) break;
+            if (attempt == 3) {
+                return handleFailedRead(lastGoodTelemetry, "Telemetry");
+            }
         }
         ByteBuffer b = ByteBuffer.wrap(d).order(ByteOrder.LITTLE_ENDIAN);
         TelemetryBlock t = new TelemetryBlock();
@@ -939,7 +1191,7 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         }
         t.presentMask = d[BBRRegMap.REG_SENSOR_PRESENT_MASK - base] & 0xFF;
         t.timestampMicros = b.getInt(BBRRegMap.REG_TELEMETRY_TIMESTAMP - base) & 0xFFFFFFFFL;
-        noteGoodRead();
+        noteGoodRead(SOURCE_TELEMETRY, t.timestampMicros);
         lastGoodTelemetry = t;
         return t;
     }
@@ -1231,7 +1483,7 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         }
         s.calibGrade = d[BBRRegMap.REG_IMU_CALIB - base] & 0xFF;
         s.timestampMicros = b.getInt(BBRRegMap.REG_IMU_TIMESTAMP - base) & 0xFFFFFFFFL;
-        noteGoodRead();
+        noteGoodRead(SOURCE_IMU, s.timestampMicros);
         lastGoodImu = s;
         return s;
     }
@@ -1356,12 +1608,25 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
     }
 
     /**
+     * TELEMETRY_CRC16 sits inside the block it covers, so it is computed
+     * over all 96 bytes with its own two bytes taken as zero.
+     */
+    private static boolean telemetryCrcMatches(byte[] d) {
+        int off = BBRRegMap.REG_TELEMETRY_CRC16 - BBRRegMap.SNAP_TELEMETRY_START;
+        int stored = (d[off] & 0xFF) | ((d[off + 1] & 0xFF) << 8);
+        byte[] copy = d.clone();
+        copy[off] = 0;
+        copy[off + 1] = 0;
+        return crc16Profibus(copy, copy.length) == stored;
+    }
+
+    /**
      * Raw localizer snapshot, any state; check {@code status} yourself.
      * Verifies LOC_CRC16 against the block — I2C acknowledges bytes without
      * verifying them, and a noise-flipped bit would otherwise arrive looking
-     * like a valid pose. Re-reads on mismatch, then serves the last good
-     * pose rather than a suspect one; a corruption streak that outlives a
-     * teardown still escalates through the fail-streak policy.
+     * like a valid pose. Re-reads on mismatch; after three corrupt reads
+     * serves the last good pose rather than returning a suspect one, leaving
+     * the read-failure policy to deal with corruption that persists.
      */
     public LocalizerState readLocalizerRaw() {
         byte[] d;
@@ -1400,7 +1665,7 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         s.headingRad = b.getShort(BBRRegMap.REG_LOC_H - base)
                 / (double) BBRRegMap.LOC_HEADING_SCALE;
         s.timestampMicros = b.getInt(BBRRegMap.REG_LOC_TIMESTAMP - base) & 0xFFFFFFFFL;
-        noteGoodRead();
+        noteGoodRead(SOURCE_LOCALIZER, s.timestampMicros);
         lastGoodLocalizer = s;
         return s;
     }
@@ -1478,14 +1743,20 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
 
     /**
      * Latch stored parameters, zero the pose, and calibrate the gyro (~1 s).
-     * The robot must be completely still. Call at match start, then
+     * Keep the robot completely still. Call at match start, then
      * {@link #waitForLocalizerReady} before reading the pose. Persist
      * parameters and the new bias with {@link #saveConfigToFlash()} at
      * setup time.
+     *
+     * <p>Returns {@code true} with a fresh gyro bias, or {@code false} if the
+     * robot moved during calibration. Either way the pose is reset and the
+     * localizer starts; {@code false} only means the previous bias is kept.
+     * Bad localizer parameters still throw.
      */
-    public void resetLocalizerAndCalibrateImu() {
+    public boolean resetLocalizerAndCalibrateImu() {
         requireImu();
-        runCommand(BBRRegMap.CMD_LOC_RESET, 0, BBRRegMap.CMD_LOC_RESET_MAX_MS);
+        return runCalibration(BBRRegMap.CMD_LOC_RESET, BBRRegMap.CMD_LOC_RESET_MAX_MS,
+                "resetLocalizerAndCalibrateImu");
     }
 
     /**

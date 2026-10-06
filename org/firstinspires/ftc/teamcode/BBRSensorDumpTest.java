@@ -28,6 +28,7 @@ public class BBRSensorDumpTest extends LinearOpMode {
         // Identity is read once at init — worth showing, because "wrong
         // variant" explains a missing IMU block before you go hunting.
         telemetry.addData("variant", exp.isOdometryVariant() ? "odometry" : "base");
+        telemetry.addData("firmware", exp.getFirmwareVersion());
         telemetry.addData("protocol", "1.%d", exp.getProtocolMinor());
         telemetry.addData("capabilities", capsName(exp.getCapabilities()));
         telemetry.addLine();
@@ -45,6 +46,15 @@ public class BBRSensorDumpTest extends LinearOpMode {
             telemetry.addData("STATUS", "0x%02X %s", status, statusName(status));
             // false = the last read served stale data (teardown or bus trouble)
             telemetry.addData("data fresh", exp.isDataFresh());
+            // Firmware 1.1.0+: a reset, or bus counters that climb while the
+            // robot runs, separate a rebooting board from a noisy cable.
+            if (exp.getProtocolMinor() >= 2) {
+                BBRDigitalExpander.Diagnostics g = exp.readDiagnostics();
+                telemetry.addData("last reset", "%s (%d since power-on)",
+                        g.resetCause, g.resetsSincePowerOn);
+                telemetry.addData("bus recoveries / arb lost", "%d / %d",
+                        g.i2cRecoveryCount, g.i2cArbitrationLostCount);
+            }
             telemetry.addData("present mask", "0x%02X", t.presentMask);
             telemetry.addData("sample age", "%d us stamp", t.timestampMicros);
             telemetry.addLine();
