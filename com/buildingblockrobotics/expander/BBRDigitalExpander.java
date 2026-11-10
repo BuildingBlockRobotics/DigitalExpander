@@ -276,6 +276,12 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
                             + "or a mis-assembled board", hwVariant));
         }
         capabilities = id[BBRRegMap.REG_CAPABILITIES] & 0xFF;
+        // Carry on from the last token the board accepted. The board keeps
+        // its command cache until it reboots, but this object starts over
+        // with every app restart: counting from 1 again would make the first
+        // command replay (silently not run) or fail ERR_TOKEN_REUSE whenever
+        // it lands on the cached token. A failed read gives 0, which is safe.
+        token = deviceClient.read(BBRRegMap.REG_COMMAND_TOKEN, 1)[0];
         firmwareVersion = (id[BBRRegMap.REG_FW_VERSION_MAJOR] & 0xFF) + "."
                 + (id[BBRRegMap.REG_FW_VERSION_MINOR] & 0xFF) + "."
                 + (id[BBRRegMap.REG_FW_VERSION_PATCH] & 0xFF);
