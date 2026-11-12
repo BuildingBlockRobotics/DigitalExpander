@@ -709,7 +709,8 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
             throw new BBRException(
                     "toleranceDeg must be more than 0 and at most 180, got " + toleranceDeg);
         }
-        requireImu();  // a heading trigger on a board with no IMU never fires
+        // A heading trigger on a board with no IMU never fires.
+        if (!requireImu()) return;
 
         OutputConfig c = new OutputConfig();
         c.source = OutputSource.IMU_HEADING;
@@ -788,7 +789,7 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
 
     /** Zero yaw at the current orientation. Call at match start. */
     public void resetHeading() {
-        requireImu();
+        if (!requireImu()) return;
         runCommand(BBRRegMap.CMD_IMU_RESET_HEADING, 0, 10);
     }
 
@@ -892,7 +893,7 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
      * the OpMode. Call again while still if heading drift matters.
      */
     public boolean calibrateGyro() {
-        requireImu();
+        if (!requireImu()) return false;
         return runCalibration(BBRRegMap.CMD_CALIBRATE_GYRO, BBRRegMap.CMD_CALIBRATE_GYRO_MAX_MS,
                 "calibrateGyro");
     }
@@ -933,7 +934,8 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
                 case RUNNING:
                     return true;
                 case FAULT_NO_IMU:
-                    requireImu();  // produces the specific base-variant/fault message
+                    // requireImu() produces the specific base-variant/fault message
+                    if (!requireImu()) return false;
                     throw new BBRException("Localizer faulted: IMU unavailable");
                 case NOT_READY:
                     throw new BBRException(
@@ -1407,8 +1409,12 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
      * never changes — the worst possible failure, because it looks like
      * working software. So this throws, loudly and specifically, whenever
      * the IMU cannot be trusted (md, "When the IMU is unavailable").
+     *
+     * <p>Returns {@code false}, after logging a warning, when the OpMode is
+     * stopping and the check never reached the device: callers skip their
+     * command rather than end the OpMode with an error the team cannot act on.
      */
-    private void requireImu() {
+    private boolean requireImu() {
         boolean fitted = (capabilities & BBRRegMap.CAP_IMU) != 0;
         int istat = deviceClient.read(BBRRegMap.REG_IMU_STATUS, 1)[0] & 0xFF;
         boolean responding = (istat & BBRRegMap.ISTAT_PRESENT) != 0;
@@ -1422,10 +1428,16 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
         if (!responding || istat == 0xFF) {
             int id = deviceClient.read(BBRRegMap.REG_DEVICE_ID, 1)[0] & 0xFF;
             if (id != BBRRegMap.DEVICE_ID_VALUE) {
+                // The SDK interrupts the OpMode thread on STOP, and a read in
+                // flight then comes back as zeros: a teardown, not a fault.
+                if (Thread.currentThread().isInterrupted()) {
+                    RobotLog.ww("BBRDigitalExpander", "IMU check skipped: the OpMode is"
+                            + " stopping (DEVICE_ID read back as 0x%02X)", id);
+                    return false;
+                }
                 throw new BBRTransportException(
                         "IMU read did not reach the device (DEVICE_ID read back as "
-                                + String.format("0x%02X", id) + ") — normal if the "
-                                + "OpMode is stopping; otherwise check that the device "
+                                + String.format("0x%02X", id) + ") — check that the device "
                                 + "is still configured and powered");
             }
         }
@@ -1448,6 +1460,7 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
                     + "build inconsistency, check the variant straps");
         }
         imuVerified = true;
+        return true;
     }
 
     public ImuState readImu() {
@@ -1582,7 +1595,8 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
             case RUNNING:
                 return;
             case FAULT_NO_IMU:
-                requireImu();  // produces the specific base-variant/fault message
+                // requireImu() produces the specific base-variant/fault message
+                if (!requireImu()) return;
                 throw new BBRException("Localizer faulted: IMU unavailable");
             case NOT_READY:
                 throw new BBRException(
@@ -1760,7 +1774,7 @@ public class BBRDigitalExpander extends I2cDeviceSynchDevice<I2cDeviceSynch> {
      * Bad localizer parameters still throw.
      */
     public boolean resetLocalizerAndCalibrateImu() {
-        requireImu();
+        if (!requireImu()) return false;
         return runCalibration(BBRRegMap.CMD_LOC_RESET, BBRRegMap.CMD_LOC_RESET_MAX_MS,
                 "resetLocalizerAndCalibrateImu");
     }
